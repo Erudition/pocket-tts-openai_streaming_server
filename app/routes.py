@@ -22,6 +22,7 @@ from app.services.audio import (
     apply_atempo_buffer,
     apply_atempo_to_pcm_stream,
     convert_audio,
+    ffmpeg_available,
     get_mime_type,
     tensor_to_pcm_bytes,
     validate_format,
@@ -237,12 +238,21 @@ def generate_speech():
         if not (SPEED_MIN <= speed <= SPEED_MAX):
             return jsonify(
                 {
-                    'error': (
-                        f"'speed' must be between {SPEED_MIN} and {SPEED_MAX}"
-                    ),
+                    'error': (f"'speed' must be between {SPEED_MIN} and {SPEED_MAX}"),
                     'received': speed,
                 }
             ), 400
+
+    # atempo needs ffmpeg. When it's missing, degrade gracefully rather than
+    # failing the request: serve normal-speed audio and warn so the operator
+    # knows why `speed` had no effect.
+    if speed != 1.0 and not ffmpeg_available():
+        logger.warning(
+            "Ignoring 'speed=%s': ffmpeg not found on PATH. Install ffmpeg to "
+            'enable the speed parameter.',
+            speed,
+        )
+        speed = 1.0
 
     tts = get_tts_service()
 
@@ -364,9 +374,7 @@ def _stream_audio(tts, voice_state, text: str, fmt: str, speed: float = 1.0):
         if speed == 1.0:
             yield from pcm_chunks()
         else:
-            yield from apply_atempo_to_pcm_stream(
-                pcm_chunks(), tts.sample_rate, speed
-            )
+            yield from apply_atempo_to_pcm_stream(pcm_chunks(), tts.sample_rate, speed)
 
     mimetype = get_mime_type(stream_fmt)
 

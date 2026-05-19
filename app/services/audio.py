@@ -3,10 +3,11 @@ Audio conversion and streaming utilities.
 """
 
 import io
+import shutil
 import struct
 import subprocess
 import threading
-from typing import Iterator
+from collections.abc import Iterator
 
 import torch
 import torchaudio
@@ -26,6 +27,18 @@ SPEED_MAX = 4.0
 # outside that band are realised by chaining stages (e.g. 0.25 → 0.5,0.5).
 _ATEMPO_STAGE_MIN = 0.5
 _ATEMPO_STAGE_MAX = 2.0
+
+
+def ffmpeg_available() -> bool:
+    """
+    Return True if an `ffmpeg` binary is on PATH.
+
+    Only consulted when a non-default `speed` is requested, so the default
+    (speed=1.0) path keeps its zero overhead. Not cached: the lookup is cheap
+    and leaving it uncached keeps the answer correct if ffmpeg is installed
+    while the server is already running.
+    """
+    return shutil.which('ffmpeg') is not None
 
 
 def validate_format(fmt: str) -> str:
@@ -194,9 +207,7 @@ def _build_atempo_chain(speed: float) -> str:
     return ','.join(filters)
 
 
-def apply_atempo_buffer(
-    audio_buffer: io.BytesIO, target_format: str, speed: float
-) -> io.BytesIO:
+def apply_atempo_buffer(audio_buffer: io.BytesIO, target_format: str, speed: float) -> io.BytesIO:
     """
     Run a fully-encoded audio buffer through ffmpeg's `atempo` filter and
     return a new buffer in the same `target_format`.
@@ -227,10 +238,14 @@ def apply_atempo_buffer(
             [
                 'ffmpeg',
                 '-hide_banner',
-                '-loglevel', 'error',
-                '-i', 'pipe:0',
-                '-af', af_chain,
-                '-f', mux_format,
+                '-loglevel',
+                'error',
+                '-i',
+                'pipe:0',
+                '-af',
+                af_chain,
+                '-f',
+                mux_format,
                 'pipe:1',
             ],
             input=audio_bytes,
@@ -239,8 +254,7 @@ def apply_atempo_buffer(
         )
     except FileNotFoundError as e:
         raise RuntimeError(
-            "ffmpeg is required to apply the 'speed' parameter but was not "
-            'found on PATH'
+            "ffmpeg is required to apply the 'speed' parameter but was not found on PATH"
         ) from e
     except subprocess.CalledProcessError as e:
         stderr = e.stderr.decode('utf-8', errors='replace')[:500]
@@ -274,13 +288,20 @@ def apply_atempo_to_pcm_stream(
             [
                 'ffmpeg',
                 '-hide_banner',
-                '-loglevel', 'error',
-                '-f', 's16le',
-                '-ar', str(sample_rate),
-                '-ac', '1',
-                '-i', 'pipe:0',
-                '-af', af_chain,
-                '-f', 's16le',
+                '-loglevel',
+                'error',
+                '-f',
+                's16le',
+                '-ar',
+                str(sample_rate),
+                '-ac',
+                '1',
+                '-i',
+                'pipe:0',
+                '-af',
+                af_chain,
+                '-f',
+                's16le',
                 'pipe:1',
             ],
             stdin=subprocess.PIPE,
@@ -289,8 +310,7 @@ def apply_atempo_to_pcm_stream(
         )
     except FileNotFoundError as e:
         raise RuntimeError(
-            "ffmpeg is required to apply the 'speed' parameter but was not "
-            'found on PATH'
+            "ffmpeg is required to apply the 'speed' parameter but was not found on PATH"
         ) from e
 
     feed_error: list[BaseException] = []
