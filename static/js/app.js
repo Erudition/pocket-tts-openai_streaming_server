@@ -478,10 +478,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 				});
 				if (speed !== 1.0) params.set('speed', String(speed));
 				const streamUrl = `/v1/audio/speech?${params}`;
+				outputSection.classList.add('active');
 				audioPlayer.src = streamUrl;
 				audioPlayer.oncanplay = () => {
 					showStats(performance.now());
-					outputSection.classList.add('active');
 					audioPlayer.oncanplay = null;
 				};
 				audioPlayer.onended = () => {
