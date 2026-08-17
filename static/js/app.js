@@ -438,12 +438,30 @@ document.addEventListener('DOMContentLoaded', async () => {
 		generateBtn.disabled = true;
 		outputSection.classList.remove('active');
 		statsRow.hidden = true;
+		clearInterval(streamDurationTimer);
 		generateStartTime = performance.now();
 
 		function showStats(endTime) {
 			const elapsed = (endTime - generateStartTime) / 1000;
 			statLatency.textContent = `Latency: ${elapsed.toFixed(2)}s`;
+			statDuration.textContent = '';
+			statRtf.textContent = '';
 			statsRow.hidden = false;
+		}
+
+		// Poll until the browser reports a real duration (streaming has no Content-Length)
+		let streamDurationTimer = null;
+		function startStreamDurationWatch() {
+			clearInterval(streamDurationTimer);
+			streamDurationTimer = setInterval(() => {
+				const dur = audioPlayer.duration;
+				if (isFinite(dur) && dur > 0 && dur < 3600) {
+					clearInterval(streamDurationTimer);
+					const elapsed = (performance.now() - generateStartTime) / 1000;
+					statDuration.textContent = `Duration: ${dur.toFixed(2)}s`;
+					statRtf.textContent = `RTF: ${(dur / elapsed).toFixed(1)}x`;
+				}
+			}, 500);
 		}
 
 		try {
@@ -458,15 +476,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 				audioPlayer.src = streamUrl;
 				audioPlayer.oncanplay = () => {
 					showStats(performance.now());
+					startStreamDurationWatch();
 					outputSection.classList.add('active');
 					audioPlayer.oncanplay = null;
-				};
-				audioPlayer.onloadedmetadata = () => {
-					const dur = audioPlayer.duration;
-					const elapsed = (performance.now() - generateStartTime) / 1000;
-					const rtf = dur / elapsed;
-					statDuration.textContent = `Duration: ${dur.toFixed(2)}s`;
-					statRtf.textContent = `RTF: ${rtf.toFixed(1)}x`;
 				};
 				audioPlayer.play().catch((e) => console.warn('Auto-play blocked:', e));
 
