@@ -125,7 +125,8 @@ def write_wav_header(
     """
     Generate a WAV header for streaming.
 
-    If num_frames is 0, set to max value (streaming/unknown length).
+    If num_frames is 0, set data size to 0 (WAV spec: "data extends to EOF").
+    The browser shows buffered duration instead of a bogus total.
 
     Args:
         sample_rate: Audio sample rate
@@ -142,7 +143,7 @@ def write_wav_header(
     # Data size: if unknown, max uint32
     data_size = num_frames * block_align
     if num_frames == 0:
-        data_size = 0xFFFFFFFF - 36
+        data_size = 0
 
     chunk_size = 36 + data_size
 
@@ -409,7 +410,7 @@ def encode_pcm_stream(
     if target_format == 'opus':
         cmd.extend(['-c:a', 'libopus', '-f', 'ogg'])
     elif target_format == 'mp3':
-        cmd.extend(['-f', 'mp3'])
+        cmd.extend(['-f', 'mp3', '-write_xing', '0'])
     elif target_format == 'aac':
         cmd.extend(['-f', 'adts'])
     elif target_format == 'flac':
