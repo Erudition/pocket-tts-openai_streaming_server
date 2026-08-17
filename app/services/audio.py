@@ -139,10 +139,10 @@ def write_wav_header(
     byte_rate = sample_rate * num_channels * bits_per_sample // 8
     block_align = num_channels * bits_per_sample // 8
 
-    # Data size: if unknown, max uint32
+    # Data size: if unknown, fake 30 seconds (browsers choke on max uint32).
     data_size = num_frames * block_align
     if num_frames == 0:
-        data_size = 0xFFFFFFFF - 36
+        data_size = sample_rate * num_channels * bits_per_sample // 8 * 30
 
     chunk_size = 36 + data_size
 
