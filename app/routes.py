@@ -96,47 +96,6 @@ def health():
     ), 200 if tts.is_loaded else 503
 
 
-@api.route('/debug', methods=['GET'])
-def debug():
-    """Debug endpoint showing torch config and system info."""
-    import os
-    import platform
-    import torch
-
-    info = {
-        'torch_version': torch.__version__,
-        'torch_threads': torch.get_num_threads(),
-        'torch_interop_threads': torch.get_num_interop_threads(),
-        'python_version': platform.python_version(),
-        'platform': platform.platform(),
-        'machine': platform.machine(),
-        'cpu_count': os.cpu_count(),
-        'omp_num_threads': os.environ.get('OMP_NUM_THREADS', 'not set'),
-        'cpuinfo_first_line': '',
-    }
-    try:
-        with open('/proc/cpuinfo') as f:
-            for line in f:
-                if line.strip():
-                    info['cpuinfo_first_line'] = line.strip()
-                    break
-    except Exception:
-        pass
-
-    try:
-        import torch.backends.mkldnn as mkldnn
-        info['mkldnn_available'] = mkldnn.is_available()
-    except Exception:
-        info['mkldnn_available'] = 'unknown'
-
-    try:
-        info['openmp_available'] = torch.backends.openmp.is_available()
-    except Exception:
-        info['openmp_available'] = 'unknown'
-
-    return jsonify(info)
-
-
 @api.route('/v1/voices', methods=['GET'])
 def list_voices():
     """
