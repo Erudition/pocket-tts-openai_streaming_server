@@ -21,7 +21,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 	let availableVoices = [];
 	let selectedVoiceId = null;
 	let generateStartTime = 0;
-	let streamDurationTimer = null;
+	let currentStatsId = null;
 
 	// Format & Streaming Logic
 	function updateStreamingAvailability() {
@@ -439,7 +439,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 		generateBtn.disabled = true;
 		outputSection.classList.remove('active');
 		statsRow.hidden = true;
-		clearInterval(streamDurationTimer);
 		generateStartTime = performance.now();
 
 		function showStats(endTime) {
@@ -450,34 +449,45 @@ document.addEventListener('DOMContentLoaded', async () => {
 			statsRow.hidden = false;
 		}
 
-		function startStreamDurationWatch() {
-			clearInterval(streamDurationTimer);
-			streamDurationTimer = setInterval(() => {
-				const dur = audioPlayer.duration;
-				if (isFinite(dur) && dur > 0 && dur < 3600) {
-					clearInterval(streamDurationTimer);
-					const elapsed = (performance.now() - generateStartTime) / 1000;
-					statDuration.textContent = `Duration: ${dur.toFixed(2)}s`;
-					statRtf.textContent = `RTF: ${(dur / elapsed).toFixed(1)}x`;
+		async function pollStreamStats() {
+			if (!currentStatsId) return;
+			try {
+				const res = await fetch(`/v1/audio/speech/stats?id=${currentStatsId}`);
+				if (!res.ok) return;
+				const data = await res.json();
+				if (data.generation_time != null && data.audio_duration != null) {
+					statLatency.textContent = `Gen: ${data.generation_time.toFixed(2)}s`;
+					statDuration.textContent = `Duration: ${data.audio_duration.toFixed(2)}s`;
+					const rtf = data.generation_time > 0
+						? data.audio_duration / data.generation_time
+						: 0;
+					statRtf.textContent = `RTF: ${rtf.toFixed(1)}x`;
+					currentStatsId = null;
 				}
-			}, 500);
+			} catch {
+			}
 		}
 
 		try {
 			if (stream && fmt !== 'pcm') {
+				currentStatsId = crypto.randomUUID();
 				const params = new URLSearchParams({
 					input: text,
 					voice: voice,
 					response_format: fmt,
+					stats_id: currentStatsId,
 				});
 				if (speed !== 1.0) params.set('speed', String(speed));
 				const streamUrl = `/v1/audio/speech?${params}`;
 				audioPlayer.src = streamUrl;
 				audioPlayer.oncanplay = () => {
 					showStats(performance.now());
-					startStreamDurationWatch();
 					outputSection.classList.add('active');
 					audioPlayer.oncanplay = null;
+				};
+				audioPlayer.onended = () => {
+					pollStreamStats();
+					audioPlayer.onended = null;
 				};
 				audioPlayer.play().catch((e) => console.warn('Auto-play blocked:', e));
 

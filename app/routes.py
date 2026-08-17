@@ -2,6 +2,7 @@
 Flask routes for the OpenAI-compatible TTS API.
 """
 
+import threading
 import time
 
 from flask import (
@@ -38,6 +39,12 @@ logger = get_logger('routes')
 
 # Create blueprint
 api = Blueprint('api', __name__)
+
+# Per-request audio stats storage.  Keyed by a client-generated UUID; values
+# are dicts with 'generation_time' (float, seconds) and 'audio_duration'
+# (float, seconds).  Cleaned up after the client polls once.
+_audio_stats_lock = threading.Lock()
+_audio_stats: dict[str, dict] = {}
 
 # Create text preprocessor instance, some options changed from defaults
 text_preprocessor = TextPreprocessor(
@@ -287,7 +294,10 @@ def generate_speech():
             text = text_preprocessor.process(text)
             # logger.info(f'Preprocessed text: {text}')
         if use_streaming:
-            return _stream_audio(tts, voice_state, text, target_format, speed=speed)
+            stats_id = data.get('stats_id')
+            return _stream_audio(
+                tts, voice_state, text, target_format, speed=speed, stats_id=stats_id
+            )
         return _generate_file(tts, voice_state, text, target_format, speed=speed)
 
     except ValueError as e:
@@ -337,6 +347,9 @@ def generate_speech_get():
         voice: string (optional) - Voice ID or path (default: alba)
         response_format: string (optional) - Audio format (default: mp3)
         speed: float (optional) - Playback speed multiplier in [0.25, 4.0]
+        stats_id: string (optional) - Client-generated UUID; server stores
+            generation timing under this key so the client can poll
+            ``/v1/audio/speech/stats?id=<stats_id>`` after playback.
     """
     from flask import current_app
 
@@ -389,7 +402,10 @@ def generate_speech_get():
             text = text_preprocessor.process(text)
 
         # GET always streams — the <audio> element needs a continuous response.
-        return _stream_audio(tts, voice_state, text, target_format, speed=speed)
+        stats_id = request.args.get('stats_id')
+        return _stream_audio(
+            tts, voice_state, text, target_format, speed=speed, stats_id=stats_id
+        )
 
     except ValueError as e:
         logger.warning(f'Voice loading failed: {e}')
@@ -397,6 +413,27 @@ def generate_speech_get():
     except Exception as e:
         logger.exception('Generation failed')
         return jsonify({'error': str(e)}), 500
+
+
+@api.route('/v1/audio/speech/stats', methods=['GET'])
+def audio_speech_stats():
+    """Return generation stats for a streaming request, then delete them.
+
+    The client passes a ``stats_id`` query parameter that it generated before
+    starting the streaming request.  The server stores timing data under that
+    key once generation completes and removes it on the first poll.
+    """
+    stats_id = request.args.get('id')
+    if not stats_id:
+        return jsonify({'error': "Missing 'id' query parameter"}), 400
+
+    with _audio_stats_lock:
+        stats = _audio_stats.pop(stats_id, None)
+
+    if stats is None:
+        return jsonify({'error': 'Stats not found (may have already been polled)'}), 404
+
+    return jsonify(stats)
 
 
 def _generate_file(tts, voice_state, text: str, fmt: str, speed: float = 1.0):
@@ -417,36 +454,60 @@ def _generate_file(tts, voice_state, text: str, fmt: str, speed: float = 1.0):
     )
 
 
-def _stream_audio(tts, voice_state, text: str, fmt: str, speed: float = 1.0):
+def _stream_audio(
+    tts, voice_state, text: str, fmt: str, speed: float = 1.0, stats_id: str | None = None
+):
     """Stream audio chunks.
 
     For PCM and WAV the data is emitted directly (WAV prepends a header).
     All other formats are encoded on the fly by piping PCM through ffmpeg.
     Opus uses an OGG container so the browser ``<audio>`` element can play
     it natively.
+
+    When *stats_id* is provided the generator tracks wall-clock generation
+    time and total PCM sample count, then stores the resulting stats in
+    ``_audio_stats`` so the client can poll ``/v1/audio/speech/stats``.
     """
 
+    sample_rate = tts.sample_rate
+    total_pcm_bytes = 0
+    t0 = time.monotonic()
+
     def pcm_chunks():
+        nonlocal total_pcm_bytes
         stream = tts.generate_audio_stream(voice_state, text)
         for chunk_tensor in stream:
-            yield tensor_to_pcm_bytes(chunk_tensor)
+            pcm = tensor_to_pcm_bytes(chunk_tensor)
+            total_pcm_bytes += len(pcm)
+            yield pcm
 
     def stream_with_header():
         if fmt == 'pcm':
             yield from pcm_chunks()
         elif fmt == 'wav':
-            yield write_wav_header(tts.sample_rate, num_channels=1, bits_per_sample=16)
+            yield write_wav_header(sample_rate, num_channels=1, bits_per_sample=16)
             if speed == 1.0:
                 yield from pcm_chunks()
             else:
                 yield from apply_atempo_to_pcm_stream(
-                    pcm_chunks(), tts.sample_rate, speed
+                    pcm_chunks(), sample_rate, speed
                 )
         else:
             # mp3 / opus / aac / flac — encode on the fly via ffmpeg.
             yield from encode_pcm_stream(
-                pcm_chunks(), tts.sample_rate, fmt, speed
+                pcm_chunks(), sample_rate, fmt, speed
             )
+
+        # Store stats once the generator is exhausted (all data sent).
+        if stats_id:
+            generation_time = time.monotonic() - t0
+            # total_pcm_bytes is 16-bit mono samples → 2 bytes per sample.
+            audio_duration = total_pcm_bytes / (sample_rate * 2) if sample_rate else 0
+            with _audio_stats_lock:
+                _audio_stats[stats_id] = {
+                    'generation_time': round(generation_time, 4),
+                    'audio_duration': round(audio_duration, 4),
+                }
 
     mimetype = streaming_mime_type(fmt)
 
