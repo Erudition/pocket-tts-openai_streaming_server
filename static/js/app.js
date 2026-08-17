@@ -21,6 +21,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 	let availableVoices = [];
 	let selectedVoiceId = null;
 	let generateStartTime = 0;
+	let streamDurationTimer = null;
 
 	// Format & Streaming Logic
 	function updateStreamingAvailability() {
@@ -449,8 +450,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 			statsRow.hidden = false;
 		}
 
-		// Poll until the browser reports a real duration (streaming has no Content-Length)
-		let streamDurationTimer = null;
 		function startStreamDurationWatch() {
 			clearInterval(streamDurationTimer);
 			streamDurationTimer = setInterval(() => {
