@@ -456,7 +456,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 				if (!res.ok) return;
 				const data = await res.json();
 				if (data.generation_time != null && data.audio_duration != null) {
-					statLatency.textContent = `Gen: ${data.generation_time.toFixed(2)}s`;
 					statDuration.textContent = `Duration: ${data.audio_duration.toFixed(2)}s`;
 					const rtf = data.generation_time > 0
 						? data.audio_duration / data.generation_time
