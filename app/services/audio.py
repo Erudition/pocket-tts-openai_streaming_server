@@ -125,8 +125,7 @@ def write_wav_header(
     """
     Generate a WAV header for streaming.
 
-    If num_frames is 0, set data size to 0 (WAV spec: "data extends to EOF").
-    The browser shows buffered duration instead of a bogus total.
+    If num_frames is 0, set to max value (streaming/unknown length).
 
     Args:
         sample_rate: Audio sample rate
@@ -143,7 +142,7 @@ def write_wav_header(
     # Data size: if unknown, max uint32
     data_size = num_frames * block_align
     if num_frames == 0:
-        data_size = 0
+        data_size = 0xFFFFFFFF - 36
 
     chunk_size = 36 + data_size
 
