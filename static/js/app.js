@@ -18,36 +18,22 @@ document.addEventListener('DOMContentLoaded', async () => {
 	// Format & Streaming Logic
 	function updateStreamingAvailability() {
 		const fmt = formatSelect.value;
-		// Server only supports streaming for PCM and WAV currently
-		const supportsStreaming = ['wav', 'pcm'].includes(fmt);
 		const infoLabel = document.getElementById('format-info');
 
-		if (supportsStreaming) {
-			streamToggle.disabled = false;
-			streamToggle.parentElement.title = '';
+		// All formats support streaming now — the server encodes on the fly via
+		// ffmpeg. PCM is raw bytes that won't play in the <audio> element.
+		streamToggle.disabled = false;
+		streamToggle.parentElement.title = '';
 
-			if (fmt === 'pcm') {
-				infoLabel.textContent =
-					"Streaming is available for Raw PCM. Note: This format creates a specialized raw stream that will not play in the browser's audio player.";
-			} else {
-				// WAV
-				infoLabel.textContent =
-					'Streaming is available for WAV. The server streams audio chunks for lower latency.';
-			}
+		if (fmt === 'pcm') {
+			infoLabel.textContent =
+				"Streaming is available for Raw PCM. Note: this format produces raw bytes that will not play in the browser's audio player.";
+		} else if (fmt === 'wav') {
+			infoLabel.textContent =
+				'Streaming is available for WAV. The server streams audio chunks for lower latency.';
 		} else {
-			streamToggle.disabled = true;
-			streamToggle.checked = false;
-			streamToggle.parentElement.title =
-				'Streaming is only available for WAV and PCM formats';
-
-			if (fmt === 'mp3') {
-				infoLabel.textContent =
-					'Streaming is not available for MP3 (Server limitation). A full file will be generated and played.';
-			} else if (['opus', 'aac', 'flac'].includes(fmt)) {
-				infoLabel.textContent = `Streaming is not available for ${fmt.toUpperCase()}. A full file will be generated and played.`;
-			} else {
-				infoLabel.textContent = 'Streaming is not available for this format.';
-			}
+			infoLabel.textContent =
+				`Streaming is available for ${fmt.toUpperCase()}. Audio is streamed and begins playing as soon as enough data arrives.`;
 		}
 	}
 
@@ -441,39 +427,55 @@ document.addEventListener('DOMContentLoaded', async () => {
 		outputSection.classList.remove('active');
 
 		try {
-			const response = await fetch('/v1/audio/speech', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					model: 'pocket-tts',
+			if (stream && fmt !== 'pcm') {
+				const params = new URLSearchParams({
 					input: text,
 					voice: voice,
 					response_format: fmt,
-					stream: stream,
-				}),
-			});
+				});
+				const streamUrl = `/v1/audio/speech?${params}`;
+				audioPlayer.src = streamUrl;
+				audioPlayer.oncanplay = () => {
+					outputSection.classList.add('active');
+					audioPlayer.oncanplay = null;
+				};
+				audioPlayer.play().catch((e) => console.warn('Auto-play blocked:', e));
 
-			if (!response.ok) {
-				const err = await response.json();
-				throw new Error(err.error || response.statusText);
+				downloadBtn.href = streamUrl;
+				downloadBtn.download = `generated_speech.${fmt}`;
+				downloadBtn.onclick = null;
+			} else {
+				const response = await fetch('/v1/audio/speech', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						model: 'pocket-tts',
+						input: text,
+						voice: voice,
+						response_format: fmt,
+						stream: false,
+					}),
+				});
+
+				if (!response.ok) {
+					const err = await response.json();
+					throw new Error(err.error || response.statusText);
+				}
+
+				const blob = await response.blob();
+				const url = URL.createObjectURL(blob);
+				audioPlayer.src = url;
+				downloadBtn.href = url;
+				downloadBtn.download = `generated_speech.${fmt}`;
+				downloadBtn.onclick = null;
+
+				if (fmt !== 'pcm') {
+					audioPlayer
+						.play()
+						.catch((e) => console.warn('Auto-play blocked or failed:', e));
+				}
+				outputSection.classList.add('active');
 			}
-
-			// Currently we always fetch the full blob and play it once ready.
-			// The `stream` flag is still sent to the server, but client playback
-			// uses a single blob path for robustness.
-			const blob = await response.blob();
-			const url = URL.createObjectURL(blob);
-			audioPlayer.src = url;
-			downloadBtn.href = url;
-			downloadBtn.download = `generated_speech.${fmt}`;
-
-			// PCM raw audio usually won't play in standard <audio> elements
-			if (fmt !== 'pcm') {
-				audioPlayer
-					.play()
-					.catch((e) => console.warn('Auto-play blocked or failed:', e));
-			}
-			outputSection.classList.add('active');
 		} catch (e) {
 			alert('Error generating speech: ' + e.message);
 		} finally {

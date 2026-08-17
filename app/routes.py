@@ -22,8 +22,10 @@ from app.services.audio import (
     apply_atempo_buffer,
     apply_atempo_to_pcm_stream,
     convert_audio,
+    encode_pcm_stream,
     ffmpeg_available,
     get_mime_type,
+    streaming_mime_type,
     tensor_to_pcm_bytes,
     validate_format,
     write_wav_header,
@@ -277,13 +279,6 @@ def generate_speech():
         # Check if streaming should be used
         use_streaming = stream_request or current_app.config.get('STREAM_DEFAULT', False)
 
-        # Streaming supports only PCM/WAV today; fall back to file for other formats.
-        if use_streaming and target_format not in ('pcm', 'wav'):
-            logger.warning(
-                "Streaming format '%s' is not supported; returning full file instead.",
-                target_format,
-            )
-            use_streaming = False
         # Check if text preprocessing should be used
         use_text_preprocess = current_app.config.get('TEXT_PREPROCESS_DEFAULT', False)
         # Preprocess text
@@ -330,6 +325,80 @@ def generate_speech():
         return jsonify({'error': str(e)}), 500
 
 
+@api.route('/v1/audio/speech', methods=['GET'])
+def generate_speech_get():
+    """GET version of speech generation for browser ``<audio>`` element playback.
+
+    Accepts the same parameters as the POST endpoint but as query strings.
+    Always streams the response so the browser can begin playback immediately.
+
+    Parameters:
+        input: string (required) - Text to synthesize
+        voice: string (optional) - Voice ID or path (default: alba)
+        response_format: string (optional) - Audio format (default: mp3)
+        speed: float (optional) - Playback speed multiplier in [0.25, 4.0]
+    """
+    from flask import current_app
+
+    text = request.args.get('input')
+    if not text:
+        return jsonify({'error': "Missing 'input' query parameter"}), 400
+
+    voice = request.args.get('voice', 'alba')
+    response_format = request.args.get('response_format', 'mp3')
+    target_format = validate_format(response_format)
+
+    speed = request.args.get('speed', 1.0, type=float)
+    if not (SPEED_MIN <= speed <= SPEED_MAX):
+        return jsonify(
+            {
+                'error': f"'speed' must be between {SPEED_MIN} and {SPEED_MAX}",
+                'received': speed,
+            }
+        ), 400
+
+    if speed != 1.0 and not ffmpeg_available():
+        logger.warning(
+            "Ignoring 'speed=%s': ffmpeg not found on PATH. Install ffmpeg to "
+            'enable the speed parameter.',
+            speed,
+        )
+        speed = 1.0
+
+    tts = get_tts_service()
+
+    if tts._loading:
+        return jsonify({'error': 'Model is reloading; retry shortly.'}), 503
+
+    is_valid, msg = tts.validate_voice(voice)
+    if not is_valid:
+        available = [v['id'] for v in tts.list_voices()]
+        return jsonify(
+            {
+                'error': f"Voice '{voice}' not found",
+                'available_voices': available[:10],
+                'hint': 'Use /v1/voices to see all available voices',
+            }
+        ), 400
+
+    try:
+        voice_state = tts.get_voice_state(voice)
+
+        use_text_preprocess = current_app.config.get('TEXT_PREPROCESS_DEFAULT', False)
+        if use_text_preprocess:
+            text = text_preprocessor.process(text)
+
+        # GET always streams — the <audio> element needs a continuous response.
+        return _stream_audio(tts, voice_state, text, target_format, speed=speed)
+
+    except ValueError as e:
+        logger.warning(f'Voice loading failed: {e}')
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logger.exception('Generation failed')
+        return jsonify({'error': str(e)}), 500
+
+
 def _generate_file(tts, voice_state, text: str, fmt: str, speed: float = 1.0):
     """Generate complete audio and return as file."""
     t0 = time.time()
@@ -349,18 +418,13 @@ def _generate_file(tts, voice_state, text: str, fmt: str, speed: float = 1.0):
 
 
 def _stream_audio(tts, voice_state, text: str, fmt: str, speed: float = 1.0):
-    """Stream audio chunks."""
-    # Normalize streaming format: we always emit PCM bytes, optionally wrapped
-    # in a WAV container. For non-PCM/WAV formats (e.g. mp3, opus), coerce to
-    # raw PCM to avoid mismatched content-type vs. payload.
-    stream_fmt = fmt
-    if stream_fmt not in ('pcm', 'wav'):
-        logger.warning(
-            "Requested streaming format '%s' is not supported for streaming; "
-            "falling back to 'pcm'.",
-            stream_fmt,
-        )
-        stream_fmt = 'pcm'
+    """Stream audio chunks.
+
+    For PCM and WAV the data is emitted directly (WAV prepends a header).
+    All other formats are encoded on the fly by piping PCM through ffmpeg.
+    Opus uses an OGG container so the browser ``<audio>`` element can play
+    it natively.
+    """
 
     def pcm_chunks():
         stream = tts.generate_audio_stream(voice_state, text)
@@ -368,14 +432,22 @@ def _stream_audio(tts, voice_state, text: str, fmt: str, speed: float = 1.0):
             yield tensor_to_pcm_bytes(chunk_tensor)
 
     def stream_with_header():
-        # Yield WAV header first if streaming as WAV
-        if stream_fmt == 'wav':
-            yield write_wav_header(tts.sample_rate, num_channels=1, bits_per_sample=16)
-        if speed == 1.0:
+        if fmt == 'pcm':
             yield from pcm_chunks()
+        elif fmt == 'wav':
+            yield write_wav_header(tts.sample_rate, num_channels=1, bits_per_sample=16)
+            if speed == 1.0:
+                yield from pcm_chunks()
+            else:
+                yield from apply_atempo_to_pcm_stream(
+                    pcm_chunks(), tts.sample_rate, speed
+                )
         else:
-            yield from apply_atempo_to_pcm_stream(pcm_chunks(), tts.sample_rate, speed)
+            # mp3 / opus / aac / flac — encode on the fly via ffmpeg.
+            yield from encode_pcm_stream(
+                pcm_chunks(), tts.sample_rate, fmt, speed
+            )
 
-    mimetype = get_mime_type(stream_fmt)
+    mimetype = streaming_mime_type(fmt)
 
     return Response(stream_with_context(stream_with_header()), mimetype=mimetype)

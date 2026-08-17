@@ -354,6 +354,127 @@ def apply_atempo_to_pcm_stream(
         logger.warning('ffmpeg atempo exited %d: %s', proc.returncode, stderr)
 
 
+# ── Streaming encoder ────────────────────────────────────────────────────────
+
+# MIME types for streaming responses.  Opus uses OGG container so the browser
+# <audio> element can play it natively without MediaSource Extensions.
+STREAMING_MIME_TYPES = {
+    'pcm': 'audio/L16',
+    'wav': 'audio/wav',
+    'mp3': 'audio/mpeg',
+    'opus': 'audio/opus',
+    'aac': 'audio/aac',
+    'flac': 'audio/flac',
+}
+
+
+def streaming_mime_type(fmt: str) -> str:
+    """Return the Content-Type for a streaming response in the given format."""
+    return STREAMING_MIME_TYPES.get(fmt, f'audio/{fmt}')
+
+
+def encode_pcm_stream(
+    pcm_chunks: Iterator[bytes],
+    sample_rate: int,
+    target_format: str,
+    speed: float = 1.0,
+) -> Iterator[bytes]:
+    """Encode raw 16-bit mono PCM chunks to *target_format* via ffmpeg.
+
+    Optionally applies ``atempo`` speed adjustment in the same pass so only
+    one subprocess is spawned.  All formats use their standard container so the
+    browser ``<audio>`` element can play them natively (OGG for Opus).
+
+    Caller must guarantee *target_format* is in ``STREAMING_MIME_TYPES``.
+    """
+    cmd = [
+        'ffmpeg',
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-f',
+        's16le',
+        '-ar',
+        str(sample_rate),
+        '-ac',
+        '1',
+        '-i',
+        'pipe:0',
+    ]
+
+    if speed != 1.0:
+        cmd.extend(['-af', _build_atempo_chain(speed)])
+
+    # Output format / codec
+    if target_format == 'opus':
+        cmd.extend(['-c:a', 'libopus', '-f', 'ogg'])
+    elif target_format == 'mp3':
+        cmd.extend(['-f', 'mp3'])
+    elif target_format == 'aac':
+        cmd.extend(['-f', 'adts'])
+    elif target_format == 'flac':
+        cmd.extend(['-f', 'flac'])
+    elif target_format == 'wav':
+        cmd.extend(['-f', 'wav'])
+    elif target_format == 'pcm':
+        cmd.extend(['-f', 's16le'])
+    else:
+        raise ValueError(f'Unsupported streaming format: {target_format}')
+
+    cmd.append('pipe:1')
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError as e:
+        raise RuntimeError(
+            "ffmpeg is required for streaming audio encoding but was not found on PATH"
+        ) from e
+
+    feed_error: list[BaseException] = []
+
+    def _feed() -> None:
+        try:
+            for chunk in pcm_chunks:
+                proc.stdin.write(chunk)
+        except BrokenPipeError:
+            pass
+        except BaseException as exc:  # noqa: BLE001 — re-raised on main thread
+            feed_error.append(exc)
+        finally:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+
+    feeder = threading.Thread(target=_feed, name='pcm-encoder', daemon=True)
+    feeder.start()
+
+    read_size = 4096
+    try:
+        while True:
+            data = proc.stdout.read(read_size)
+            if not data:
+                break
+            yield data
+    finally:
+        feeder.join(timeout=5)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+    if feed_error:
+        raise feed_error[0]
+
+    if proc.returncode not in (0, None):
+        stderr = proc.stderr.read().decode('utf-8', errors='replace')[:500]
+        logger.warning('ffmpeg encode exited %d: %s', proc.returncode, stderr)
+
+
 def get_mime_type(fmt: str) -> str:
     """
     Get the MIME type for an audio format.
