@@ -11,9 +11,16 @@ document.addEventListener('DOMContentLoaded', async () => {
 	const downloadBtn = document.getElementById('download-btn');
 	const streamToggle = document.getElementById('stream-toggle');
 	const formatSelect = document.getElementById('format-select');
+	const speedSlider = document.getElementById('speed-slider');
+	const speedValue = document.getElementById('speed-value');
+	const statsRow = document.getElementById('stats-row');
+	const statLatency = document.getElementById('stat-latency');
+	const statDuration = document.getElementById('stat-duration');
+	const statRtf = document.getElementById('stat-rtf');
 
 	let availableVoices = [];
-	let selectedVoiceId = null; // The actual value used for generation
+	let selectedVoiceId = null;
+	let generateStartTime = 0;
 
 	// Format & Streaming Logic
 	function updateStreamingAvailability() {
@@ -40,6 +47,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 	formatSelect.addEventListener('change', updateStreamingAvailability);
 	// Initialize state
 	updateStreamingAvailability();
+
+	speedSlider.addEventListener('input', () => {
+		speedValue.textContent = parseFloat(speedSlider.value).toFixed(2).replace(/\.?0+$/, '');
+	});
 
 	// 1. Load Voices
 	async function loadVoices() {
@@ -421,10 +432,19 @@ document.addEventListener('DOMContentLoaded', async () => {
 		// ... rest of generation logic ...
 		const stream = streamToggle.checked;
 		const fmt = formatSelect.value;
+		const speed = parseFloat(speedSlider.value);
 
 		generateBtn.classList.add('loading');
 		generateBtn.disabled = true;
 		outputSection.classList.remove('active');
+		statsRow.hidden = true;
+		generateStartTime = performance.now();
+
+		function showStats(endTime) {
+			const elapsed = (endTime - generateStartTime) / 1000;
+			statLatency.textContent = `Latency: ${elapsed.toFixed(2)}s`;
+			statsRow.hidden = false;
+		}
 
 		try {
 			if (stream && fmt !== 'pcm') {
@@ -433,11 +453,20 @@ document.addEventListener('DOMContentLoaded', async () => {
 					voice: voice,
 					response_format: fmt,
 				});
+				if (speed !== 1.0) params.set('speed', String(speed));
 				const streamUrl = `/v1/audio/speech?${params}`;
 				audioPlayer.src = streamUrl;
 				audioPlayer.oncanplay = () => {
+					showStats(performance.now());
 					outputSection.classList.add('active');
 					audioPlayer.oncanplay = null;
+				};
+				audioPlayer.onloadedmetadata = () => {
+					const dur = audioPlayer.duration;
+					const elapsed = (performance.now() - generateStartTime) / 1000;
+					const rtf = dur / elapsed;
+					statDuration.textContent = `Duration: ${dur.toFixed(2)}s`;
+					statRtf.textContent = `RTF: ${rtf.toFixed(1)}x`;
 				};
 				audioPlayer.play().catch((e) => console.warn('Auto-play blocked:', e));
 
@@ -454,6 +483,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 						voice: voice,
 						response_format: fmt,
 						stream: false,
+						...(speed !== 1.0 && { speed }),
 					}),
 				});
 
@@ -468,6 +498,16 @@ document.addEventListener('DOMContentLoaded', async () => {
 				downloadBtn.href = url;
 				downloadBtn.download = `generated_speech.${fmt}`;
 				downloadBtn.onclick = null;
+
+				audioPlayer.onloadedmetadata = () => {
+					const dur = audioPlayer.duration;
+					const elapsed = (performance.now() - generateStartTime) / 1000;
+					const rtf = dur / elapsed;
+					statLatency.textContent = `Gen: ${elapsed.toFixed(2)}s`;
+					statDuration.textContent = `Duration: ${dur.toFixed(2)}s`;
+					statRtf.textContent = `RTF: ${rtf.toFixed(1)}x`;
+					statsRow.hidden = false;
+				};
 
 				if (fmt !== 'pcm') {
 					audioPlayer
