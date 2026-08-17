@@ -409,7 +409,7 @@ def encode_pcm_stream(
     if target_format == 'opus':
         cmd.extend(['-c:a', 'libopus', '-f', 'ogg'])
     elif target_format == 'mp3':
-        cmd.extend(['-f', 'mp3', '-write_xing', '0'])
+        cmd.extend(['-f', 'mp3', '-write_xing', '0', '-reservoir', '0'])
     elif target_format == 'aac':
         cmd.extend(['-f', 'adts'])
     elif target_format == 'flac':
